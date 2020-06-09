@@ -8,6 +8,9 @@
 library(tidyverse)
 library(lubridate)
 library(scales)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
 
 # load data
 sparrow_data <- read_csv("nesp_lcsp_data.csv")
@@ -23,8 +26,8 @@ sparrow_data <- sparrow_data %>%
   pivot_wider(names_from = SpeciesCode, values_from = ObservationCount,
               values_fill = list(ObservationCount = 0)) %>% 
   pivot_longer(cols = c("NESP", "LCSP"), names_to = "SpeciesCode", values_to = "ObservationCount") %>% 
-  mutate(SurveyDate = paste0(MonthCollected, "-", DayCollected)) # create date column
-  #mutate(SurveyDOY = yday(SurveyDate)) # create julian day column
+  mutate(SurveyDate = paste0(MonthCollected, "-", DayCollected)) %>%  # create date column
+  mutate(SurveyDateYear = paste0(YearCollected, "-", MonthCollected, "-", DayCollected)) # create julian day column
 
 # calculate relative abundance per year
 sparrows_year <- sparrow_data %>% 
@@ -98,3 +101,71 @@ sparrow_data <- sparrow_data %>%
                                TimeObservationsStarted >= "04:30:00" & "10:30:00" ~ "Morning",
                                TimeObservationsStarted >= "10:31:00" & "16:00:00" ~ "Afternoon",
                                TimeObservationsStarted >= "16:01:00" & "23:59:00" ~ "Evening"))
+
+# plot map of mean count
+# set up basic things for maps 
+theme_set(theme_bw())
+world <- ne_countries(scale = "medium", returnclass = "sf")
+# lakes <- ne_download(scale = "medium", type = 'lakes', category = 'physical',
+# returnclass = "sf", destdir = "./map-data/lakes") # only need this first time downloading
+lakes <- ne_load(type = "lakes", scale = "medium", category = 'physical',
+                 returnclass = "sf",
+                 destdir = paste0(getwd(), "./map-data/lakes")) # use this if already downloaded shapefiles
+
+# get mean count for each location
+# Northbluff had multiple coordinates... use just one set for the site
+sparrow_data <- sparrow_data %>% 
+  mutate(DecimalLatitude = str_replace(DecimalLatitude, "51.4858193", "51.4879571")) %>% 
+  mutate(DecimalLatitude = str_replace(DecimalLatitude, "51.7027", "51.4879571")) %>% 
+  mutate(DecimalLongitude = str_replace(DecimalLongitude, "-80.4398775", "-80.4528165")) %>% 
+  mutate(DecimalLongitude = str_replace(DecimalLongitude, "-80.567", "-80.4528165"))
+
+# get mean and sample size for each location  
+sparrows_loc <- sparrow_data %>%
+  group_by(Locality, DecimalLatitude, DecimalLongitude, SpeciesCode) %>%
+  summarize(SampleSize = length(unique(SurveyDateYear)),
+            MeanCount = mean(ObservationCount)) %>% 
+  filter(SampleSize > 10)
+
+# map with point size based on mean count
+# convert recv.locs to an sf object
+sparrows_loc_sf <- st_as_sf(sparrows_loc, coords = c("DecimalLongitude", "DecimalLatitude"), crs = 4236)
+
+sparrows_loc$DecimalLatitude <- as.numeric(sparrows_loc$DecimalLatitude)
+sparrows_loc$DecimalLongitude <- as.numeric(sparrows_loc$DecimalLongitude)
+
+# set map limits
+xmin <- min(sparrows_loc$DecimalLongitude) - 1.25
+xmax <- max(sparrows_loc$DecimalLongitude) + 0.75
+ymin <- min(sparrows_loc$DecimalLatitude) - 0.5
+ymax <- max(sparrows_loc$DecimalLatitude) + 0.75
+
+# facet labels
+labels <- c(LCSP = "LeConte's Sparrow", NESP = "Nelson's Sparrow")
+
+# plot map
+png(filename = "DET_map.png",
+    width=8, height=5, units="in", res=600)
+
+ggplot(data = world) +
+  geom_sf(colour = NA) +
+  geom_sf(data = lakes, fill = "white", colour = NA) +
+  geom_point(data = sparrows_loc,
+             aes(x = DecimalLongitude, y = DecimalLatitude,
+                 colour = Locality, size = MeanCount), alpha = 0.7) +
+  geom_text(data = sparrows_loc, aes(x = DecimalLongitude, y = DecimalLatitude, label = Locality),
+            size = 3, hjust = "right", nudge_x = -0.15) +
+  coord_sf(
+    xlim = c(xmin, xmax),
+    ylim = c(ymin, ymax),
+    expand = FALSE
+  ) +
+  scale_color_viridis_d(guide = "none") +
+  scale_size_continuous(name = "Mean Daily Estimated Total", range = c(1,8)) +
+  facet_wrap(. ~ SpeciesCode, labeller = labeller(SpeciesCode = labels)) +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(size = 6),
+        legend.position = "bottom", strip.background = element_rect(fill = "white"))
+
+dev.off()
+
